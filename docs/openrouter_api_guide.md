@@ -215,6 +215,11 @@ Seedance 2.0 支持三种图片引导模式：
   - 全能模式（input_references + frame_images 同时使用）：首尾帧锚定画面 + 参考图/音频/视频引导风格和内容
   - 纯提示词模式（不加任何图片）：完全依赖 prompt 描述，人物用文字写清楚
 
+️ 占位符说明：
+  OpenRouter API 层没有 @占位符 机制（不支持 prompt 中写 @image_1 / @placeholder 引用图片）
+  所有参考内容统一通过 input_references / frame_images 结构化 JSON 字段传输
+  allowed_passthrough_parameters 仅 watermark 和 req_key，无 placeholder 相关参数
+
 Seedance 2.0 特殊能力：
   - input_references 支持三种类型：image_url（引导风格/内容）、audio_url（引导节奏）、video_url（引导动作）
   - audio_url / video_url 仅 Seedance 2.0（byteplus 后端）支持，其他模型只接受 image_url
@@ -267,7 +272,42 @@ def resolve_image(source):
         raise ValueError(f"图片既不是公网 URL 也不是有效本地路径: {source}")
 ```
 
-### 2.4.1 三种模式完整请求示例
+### 2.4.2 [image_n] 占位符引用
+
+Seedance 2.0 全能模式支持在 **prompt 中用 `[image_n]` 占位符引用 `input_references` 里的图片**，帮助模型理解哪张图片对应哪些描述：
+
+```json
+{
+  "model": "bytedance/seedance-2.0",
+  "prompt": "[image_1] (粉色水手服女生) 主动发起攻击，[image_2] (黑卫衣格裙女生) 侧身躲闪并反击。两人在竹林石阶上持续激烈打斗...",
+  "input_references": [
+    {"type": "image_url", "image_url": {"url": "图1的 URL 或 data URI"}},
+    {"type": "image_url", "image_url": {"url": "图2的 URL 或 data URI"}}
+  ]
+}
+```
+
+**占位符规则**：
+- 格式：`[image_1]`、`[image_2]`、`[image_3]`……（方括号 + image_ 序号，序号从 1 开始）
+- `[image_n]` 对应 `input_references` 数组中第 n 张图片（下标 n-1）
+- prompt 中可以多次引用同一个占位符，模型会在不同镜头里重复应用
+
+**对比：有/无占位符的 prompt 效果**
+
+```python
+# 无占位符：模型需要猜哪句描述对应哪张图
+prompt_a = "两个女生打斗，第一个穿粉色水手服，第二个穿黑卫衣格裙，持续战斗"
+
+# 有占位符：模型清楚每句话指哪个人物
+prompt_b = "[image_1] 持剑跃起，[image_2] 举盾格挡。两人在竹林石阶上持续激烈打斗"
+```
+
+️ **注意**：
+- OpenRouter API 层的占位符就是 `[image_n]`，不是 `@image_n` / `@placeholder` 等
+- 图片含真人仍会被 ByteDance 审核拒绝（`SensitiveContentDetected`），这是图片内容问题，与占位符格式无关
+- `input_references` 中的 audio_url / video_url 不能用 `[image_n]` 引用，它们只能作为整体风格/节奏参考
+
+### 2.4.3 真人被拒时的替代方案
 
 **模式 1：首尾帧模式**
 
