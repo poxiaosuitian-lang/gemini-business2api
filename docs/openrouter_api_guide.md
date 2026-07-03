@@ -209,33 +209,117 @@ curl -s -X POST "$GATEWAY/api/v1/videos" \
 
 ### 2.4 完整请求体
 
+```
+Seedance 2.0 支持三种图片引导模式：
+  - 首尾帧模式（frame_images）：用图片锚定视频第一帧和最后一帧，控制画面走向
+  - 全能模式（input_references + frame_images 同时使用）：首尾帧锚定画面 + 参考图/音频/视频引导风格和内容
+  - 纯提示词模式（不加任何图片）：完全依赖 prompt 描述，人物用文字写清楚
+
+Seedance 2.0 特殊能力：
+  - input_references 支持三种类型：image_url（引导风格/内容）、audio_url（引导节奏）、video_url（引导动作）
+  - audio_url / video_url 仅 Seedance 2.0（byteplus 后端）支持，其他模型只接受 image_url
+
+### 图片上传（无上传 API 的解决方案）
+
+OpenRouter/Runloop 网关没有图片上传接口（POST /api/v1/images 是生成图片，POST /api/v1/videos 是生成视频，都不支持上传）。
+
+**方案 A：有公网 URL 直接用**
+
 ```json
 {
-  "model": "string (必填)",
-  "prompt": "string (必填，避免版权 IP 名称)",
-  "resolution": "480p | 720p | 1080p | 1K | 2K | 4K",
-  "aspect_ratio": "16:9 | 9:16 | 1:1 | 4:3 | 3:4 | 3:2 | 2:3 | 21:9 | 9:21",
-  "size": "WIDTHxHEIGHT (如 1280x720，与 resolution+aspect_ratio 二选一)",
-  "duration": "整数(秒)",
-  "generate_audio": true,
-  "seed": 12345,
+  "type": "image_url",
+  "image_url": {"url": "https://example.com/photo.jpg"}
+}
+```
+
+**方案 B：没有 URL 就用 base64 data URI**
+
+直接把本地图片转成 base64 data URI 放在 url 字段里，API 会解析这种格式：
+
+```python
+import base64, os
+
+def img_to_data_uri(path):
+    """本地图片 -> base64 data URI"""
+    with open(path, "rb") as f:
+        return "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
+
+img1 = img_to_data_uri("./photo1.jpg")  # "data:image/jpeg;base64,/9j/4AAQ..."
+
+# 在请求体中使用
+frame_images = [
+    {"type": "image_url", "image_url": {"url": img1}, "frame_type": "first_frame"}
+]
+```
+
+**方案 C：封装自动判断函数（推荐）**
+
+```python
+def resolve_image(source):
+    """有 URL 就用 URL，没有就读本地转 base64，两种都失败报错"""
+    if not source:
+        return None
+    if source.startswith("http://") or source.startswith("https://"):
+        return source
+    try:
+        return img_to_data_uri(source)
+    except Exception:
+        raise ValueError(f"图片既不是公网 URL 也不是有效本地路径: {source}")
+```
+
+### 2.4.1 三种模式完整请求示例
+
+**模式 1：首尾帧模式**
+
+```json
+{
+  "model": "bytedance/seedance-2.0",
+  "prompt": "两女持剑激烈打斗...",
+  "resolution": "4K",
+  "duration": 15,
   "frame_images": [
-    {"type": "image_url", "image_url": {"url": "https://..."}, "frame_type": "first_frame"},
-    {"type": "image_url", "image_url": {"url": "https://..."}, "frame_type": "last_frame"}
+    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9j/..."}, "frame_type": "first_frame"},
+    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9j/..."}, "frame_type": "last_frame"}
+  ]
+}
+```
+
+**模式 2：全能模式**
+
+```json
+{
+  "model": "bytedance/seedance-2.0",
+  "prompt": "两女打斗，参考图中女生的特征...",
+  "resolution": "4K",
+  "duration": 15,
+  "frame_images": [
+    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}, "frame_type": "first_frame"},
+    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}, "frame_type": "last_frame"}
   ],
   "input_references": [
-    {"type": "image_url", "image_url": {"url": "https://..."}},
-    {"type": "audio_url", "audio_url": {"url": "https://..."}},
-    {"type": "video_url", "video_url": {"url": "https://..."}}
-  ],
-  "callback_url": "https://your-webhook-url",
-  "provider": {"options": {"byteplus": {"watermark": false}}}
+    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}},
+    {"type": "audio_url", "audio_url": {"url": "https://example.com/music.mp3"}}
+  ]
+}
+```
+
+**模式 3：纯提示词模式（真人被拒时使用）**
+
+```json
+{
+  "model": "bytedance/seedance-2.0",
+  "prompt": "Two women fighting with swords on stone stairs... "
+          "First woman: long black hair, pink sailor school uniform, navy pleated skirt, white knee socks, black loafers... "
+          "Second woman: long black hair with bangs, oversized black fur hoodie, blue plaid miniskirt, black tights, Mary Jane shoes...",
+  "resolution": "4K",
+  "duration": 15,
+  "generate_audio": true
 }
 ```
 
 **注意**：
-- `input_references` 中 `audio_url` / `video_url` 仅 Seedance 2.0（`byteplus` 后端）支持
-- `frame_images` 需要公网可访问的图片 URL
+- `frame_images` / `input_references` 需要公网 URL 或 base64 data URI
+- Seedance 2.0 有真人检测：图片/视频如果包含真人照片会被 ByteDance 审核拒绝，返回 `InputImageSensitiveContentDetected.PrivacyInformation`，AI 生成的人物、卡通、动漫可以正常使用。遇到真人报错时，改用纯提示词模式，用文字详细描述人物特征
 - prompt 不能包含知名 IP 名称（会触发版权审核失败）
 
 ### 2.5 轮询任务状态
@@ -268,43 +352,81 @@ curl -s -L "$GATEWAY/api/v1/videos/$JOB_ID/content?index=0" \
   -H "$AUTH" -o output.mp4
 ```
 
-### 2.7 完整 Python 调用模板
+### 2.7 完整 Python 调用模板（三种模式）
 
 ```python
-import requests, time, json, os
+import requests, time, base64, os
 
 GATEWAY = os.environ.get("OPENROUTER_BASE_URL", "https://gateway.runloop.ai")
 AUTH = {"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}",
         "Content-Type": "application/json"}
 
-def generate_video(model, prompt, resolution="720p", aspect_ratio="16:9",
-                   duration=10, generate_audio=True, **kwargs):
-    """提交视频生成任务并等待完成"""
-    
-    # 1. 提交
+# ─── 图片处理：有 URL 就用 URL，没有就读本地转 base64 ───
+
+def img_to_data_uri(path):
+    """本地图片 -> base64 data URI"""
+    with open(path, "rb") as f:
+        return "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
+
+def resolve_image(source):
+    """有 URL 就用 URL，没有就读本地转 base64，两种都失败报错"""
+    if not source:
+        return None
+    if source.startswith("http://") or source.startswith("https://"):
+        return source
+    try:
+        return img_to_data_uri(source)
+    except Exception:
+        raise ValueError(f"既不是公网 URL 也不是有效本地路径: {source}")
+
+
+# ─── 核心函数 ───
+
+def generate_video(model, prompt, resolution="4K", aspect_ratio="16:9",
+                   duration=15, generate_audio=True,
+                   frame_images=None, input_references=None, **kwargs):
+    """提交视频生成任务并等待完成，支持三种模式"""
+
     payload = {
         "model": model, "prompt": prompt,
         "resolution": resolution, "aspect_ratio": aspect_ratio,
         "duration": duration, "generate_audio": generate_audio, **kwargs
     }
+    if frame_images:
+        payload["frame_images"] = frame_images
+    if input_references:
+        payload["input_references"] = input_references
+
     resp = requests.post(f"{GATEWAY}/api/v1/videos", headers=AUTH, json=payload)
+    if resp.status_code == 400:
+        data = resp.json().get("error", {})
+        msg = data.get("message", "")
+        if "SensitiveContent" in msg or "PrivacyInformation" in msg:
+            print("[拒绝] 图片含真人被 ByteDance 审核拒绝")
+            print("[解决] 删掉 frame_images / input_references，改用纯提示词模式")
+            print("       人物特征用文字写清楚即可")
+            return None
+        raise RuntimeError(f"400: {resp.json()}")
+    if resp.status_code not in (200, 202):
+        raise RuntimeError(f"提交失败 HTTP {resp.status_code}: {resp.text[:300]}")
+
     job = resp.json()
     job_id = job["id"]
-    print(f"[提交] job_id={job_id}, status={job['status']}")
-    
-    # 2. 轮询（最多 10 分钟）
-    for i in range(30):
+    print(f"[提交] job_id={job_id}")
+
+    # 轮询（最多 15 分钟）
+    for i in range(45):
         time.sleep(20)
         r = requests.get(f"{GATEWAY}/api/v1/videos/{job_id}", headers=AUTH).json()
         status = r.get("status", "unknown")
-        print(f"  [{i+1:2d}] {status}")
+        print(f"  [{i+1:2d}/{45}] {status}")
         if status in ("completed", "failed", "cancelled", "expired"):
             return r
-    
+
     return {"status": "timeout", "id": job_id}
 
-def download_video(result, output_path):
-    """从结果中下载视频"""
+def download_video_to_local(result, output_path):
+    """从完成结果中下载视频文件"""
     urls = result.get("unsigned_urls", [])
     if not urls:
         print(f"无视频 URL, error: {result.get('error', 'N/A')}")
@@ -318,19 +440,66 @@ def download_video(result, output_path):
     print(f"[下载] {output_path} ({size:.1f} MB)")
     return True
 
-# ===== 使用示例 =====
-result = generate_video(
-    model="bytedance/seedance-2.0",
-    prompt="两个武士在日落山崖上用剑激烈搏斗，日漫风格...",
-    resolution="720p", aspect_ratio="16:9", duration=15
-)
 
-if result.get("status") == "completed":
-    download_video(result, "output.mp4")
-    print(f"费用: ${result['usage']['cost']}")
+# ─── 三种模式使用示例 ───
+
+MODE = "pure_prompt"   # 改为 "frame_only" 或 "full_mode" 切换
+
+if MODE == "frame_only":
+    # 模式 1：首尾帧
+    result = generate_video(
+        model="bytedance/seedance-2.0",
+        prompt="两女持剑激烈打斗于竹林石阶上...",
+        resolution="4K", duration=15,
+        frame_images=[
+            {"type": "image_url", "image_url": {"url": resolve_image("./girl1.jpg")}, "frame_type": "first_frame"},
+            {"type": "image_url", "image_url": {"url": resolve_image("./girl2.jpg")}, "frame_type": "last_frame"}
+        ]
+    )
+
+elif MODE == "full_mode":
+    # 模式 2：全能模式（首尾帧 + 参考图）
+    img1 = resolve_image("./girl1.jpg")
+    img2 = resolve_image("./girl2.jpg")
+    result = generate_video(
+        model="bytedance/seedance-2.0",
+        prompt="两女打斗，保持参考图中的人物特征...",
+        resolution="4K", duration=15,
+        frame_images=[
+            {"type": "image_url", "image_url": {"url": img1}, "frame_type": "first_frame"},
+            {"type": "image_url", "image_url": {"url": img2}, "frame_type": "last_frame"}
+        ],
+        input_references=[
+            {"type": "image_url", "image_url": {"url": img1}},
+            {"type": "image_url", "image_url": {"url": img2}}
+        ]
+    )
+
 else:
-    print(f"失败: {result.get('error', result.get('status', 'timeout'))}")
+    # 模式 3：纯提示词（真人被拒时使用）
+    result = generate_video(
+        model="bytedance/seedance-2.0",
+        prompt="Two women fighting with swords on stone stairs surrounded by bamboo... "
+               "First woman: long black hair, pink sailor school uniform, navy pleated skirt, white knee socks, black loafers... "
+               "Second woman: long black hair with bangs, oversized black fur hoodie, blue plaid miniskirt, black tights, Mary Jane shoes... "
+               "Non-stop dynamic combat, speed lines, blade sparks, hair flowing, no breaks.",
+        resolution="4K", duration=15, generate_audio=True
+    )
+
+if result and result.get("status") == "completed":
+    download_video_to_local(result, "output.mp4")
+    print(f"费用: ${result['usage']['cost']}")
+elif result and result.get("status") in ("failed", "cancelled"):
+    print(f"失败: {result.get('error', result.get('status', 'unknown'))}")
 ```
+
+**三种模式对比**：
+
+| 模式 | 字段 | 用途 | 适用场景 |
+|------|------|------|---------|
+| **首尾帧** | `frame_images` | 锚定首尾画面内容 | "第一帧是她 A，最后一帧是她 B" |
+| **全能模式** | `frame_images` + `input_references` | 锚定画面 + 多模态参考引导 | 服装/风格/动作/节奏都要参考 |
+| **纯提示词** | 不加图片字段 | 完全文字描述 | 人物照片被真人审核拒绝时 |
 
 ---
 
@@ -412,10 +581,13 @@ curl -s -X POST "$GATEWAY/api/v1/chat/completions" \
 - **费用控制**：每次调用后检查 `usage.cost`
 
 ### 快速排错
+
 | 错误 | 原因 | 解决 |
 |------|------|------|
 | `missing_envelope` | 用了 `/v1/...` 而非 `/api/v1/...` | 加 `/api` 前缀 |
 | `401 Missing Authentication` | Key 无效或过期 | 检查 `setup_key` 流程 |
 | `404 Not Found` | 端点错误 | 确认路径拼写 |
 | `403 Error 1010` | Cloudflare 拦截 | 检查 User-Agent / 请求格式 |
+| `400 InputImageSensitiveContentDetected` | 图像/视频中含真人（ByteDance 审核） | 改用纯提示词模式，文字描述人物特征 |
+| `400 PrivacyInformation` | 同上（真人识别） | 同上 |
 | 视频 `failed` + copyright | Prompt 含版权内容 | 用通用描述重新写 prompt |
